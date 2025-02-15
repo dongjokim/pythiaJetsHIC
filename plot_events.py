@@ -43,48 +43,87 @@ def plot_event(event_number, tree, metadata=None, ax=None, fig=None):
     # Define fixed colors for jets (using Set1 which has 9 distinct colors)
     jet_colors = plt.cm.Set1(np.linspace(0, 1, 9))  # Fixed to 9 colors
     
-    # Plot particles as vertical lines to their pT
-    for eta, phi, pt, jetidx in zip(particle_eta, particle_phi, particle_pt, particle_jetIndex):
+    # Sort jets by pT
+    jet_indices = np.argsort(jet_pt)[::-1]
+    
+    # Find leading particles in each jet
+    leading_particles = {}  # Dictionary to store leading particle index for each jet
+    leading_pt = {}        # Dictionary to store leading particle pT
+    for jetidx in range(len(jet_pt)):
+        jet_particles = [(i, pt) for i, (pt, idx) in enumerate(zip(particle_pt, particle_jetIndex)) if idx == jetidx]
+        if jet_particles:
+            max_particle = max(jet_particles, key=lambda x: x[1])
+            leading_particles[jetidx] = max_particle[0]
+            leading_pt[jetidx] = max_particle[1]
+    
+    # First plot all particles
+    for i, (eta, phi, pt, jetidx) in enumerate(zip(particle_eta, particle_phi, particle_pt, particle_jetIndex)):
         if jetidx >= 0:
-            # Jet constituents: use jet color with higher opacity
-            color = jet_colors[jetidx % 9]  # Wrap around if more than 9 jets
-            alpha = 0.8
+            # Check if this is the leading particle in its jet
+            if i == leading_particles.get(jetidx, -1):
+                color = 'darkred'  # Same color for all leading particles
+                alpha = 1.0
+                linewidth = 3.5  # Thicker line for leading particles
+                linestyle = ':'  # Dotted line for leading particles
+            else:
+                color = jet_colors[jetidx % 9]
+                alpha = 0.6
+                linewidth = 1.5
+                linestyle = '-'  # Solid line for other particles
         else:
-            # Unassociated particles: gray and more transparent
-            color = 'gray'
-            alpha = 0.3
+            color = 'lightgray'
+            alpha = 0.2
+            linewidth = 1.5
+            linestyle = '-'
             
         ax.plot([eta, eta], [phi, phi], [0, pt], 
                 color=color,
                 alpha=alpha,
-                linewidth=2)
+                linewidth=linewidth,
+                linestyle=linestyle)
     
-    # Plot jets and their radius
+    # Plot jets
     R = 0.4  # Anti-kT parameter
-    for i, (eta, phi, pt, area) in enumerate(zip(jet_eta, jet_phi, jet_pt, jet_area)):
-        # Plot jet marker at the top as an arrow
-        ax.scatter([eta], [phi], [pt], 
-                  color=jet_colors[i % 9],  # Wrap around if more than 9 jets
-                  s=100,
-                  marker='^',
-                  label=f'Jet {i}: pT={pt:.1f} GeV, area={area:.2f}')
+    for idx, i in enumerate(jet_indices):
+        eta, phi, pt, area = jet_eta[i], jet_phi[i], jet_pt[i], jet_area[i]
+        color = jet_colors[i % 9]
         
-        # Draw thicker vertical line for jet
+        # Draw jet cone for leading and subleading jets
+        if idx < 2:  # Leading and subleading jets
+            z_points = np.linspace(0, pt, 30)
+            for t in np.linspace(0, 2*np.pi, 20):
+                r = R * (1 - z_points/pt)  # Reverse cone: wider at top
+                cone_eta = eta + r * np.cos(t)
+                cone_phi = phi + r * np.sin(t)
+                
+                ax.plot(cone_eta, cone_phi, z_points,
+                       color=color,
+                       alpha=0.05,  # More transparent
+                       linewidth=1)
+        
+        # Draw jet axis
         ax.plot([eta, eta], [phi, phi], [0, pt], 
-                color=jet_colors[i % 9],
-                linestyle=':',
+                color=color,
+                linestyle='-',
                 linewidth=2,
-                alpha=0.5)
+                alpha=1.0)
         
-        # Draw jet radius circle
+        # Draw jet radius circle at z=0
         theta = np.linspace(0, 2*np.pi, 100)
         circle_eta = eta + R * np.cos(theta)
         circle_phi = phi + R * np.sin(theta)
-        circle_z = np.zeros_like(theta)  # Draw circle at z=0
+        circle_z = np.zeros_like(theta)
         ax.plot(circle_eta, circle_phi, circle_z, 
-                color=jet_colors[i % 9], 
+                color=color, 
                 linestyle='-', 
                 alpha=0.8)
+        
+        # Add jet marker at the top
+        ax.scatter([eta], [phi], [pt], 
+                  color=color,
+                  s=80,
+                  marker='^',
+                  label=f'Jet {i}: pT={pt:.1f} GeV')
 
     # Add metadata text box if available
     if metadata:
@@ -108,27 +147,32 @@ def plot_event(event_number, tree, metadata=None, ax=None, fig=None):
     ax.set_xlim(-7, 7)
     ax.set_ylim(-np.pi, np.pi)
     max_pt = max(max(particle_pt), max(jet_pt) if len(jet_pt) > 0 else 0)
-    ax.set_zlim(0, max_pt * 1.2)  # Add 20% margin on top
+    ax.set_zlim(0, max_pt * 1.2)
     
+    # Set initial view angle for better visualization
+    ax.view_init(elev=25, azim=45)
+    
+    # Add grid for better depth perception
+    ax.grid(True, alpha=0.3)
+
     # Update legend
     if len(jet_pt) > 0:
         from matplotlib.lines import Line2D
         legend_elements = [
-            Line2D([0], [0], color='gray', linewidth=2, label='Unassociated particles'),
-            Line2D([0], [0], marker='^', color='red', 
-                  markersize=10, label=f'Jets (R={R})')
+            Line2D([0], [0], color='lightgray', alpha=0.2, linewidth=1.5, label='Unassociated particles'),
+            Line2D([0], [0], color='darkred', linewidth=3.5, linestyle=':', 
+                  label=f'Leading particles (pT={max(leading_pt.values()):.1f} GeV)'),
+            Line2D([0], [0], marker='^', color='red', markersize=10, label=f'Jets (R={R})')
         ]
         # Add specific jet information
-        for i, pt in enumerate(jet_pt):
+        for i, pt in enumerate(jet_pt[jet_indices]):
+            jet_idx = jet_indices[i]
             legend_elements.append(
-                Line2D([0], [0], color=jet_colors[i % 9],
-                      linewidth=2,
-                      label=f'Jet {i}: pT={pt:.1f} GeV')
+                Line2D([0], [0], color=jet_colors[jet_idx % 9],
+                      linewidth=1.5,
+                      label=f'Jet {jet_idx}: pT={pt:.1f} GeV')
             )
         ax.legend(handles=legend_elements, loc='upper right')
-    
-    # Set the view angle
-    ax.view_init(elev=20, azim=45)
 
     return fig, ax
 
