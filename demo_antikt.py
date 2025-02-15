@@ -1,12 +1,13 @@
 import uproot
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Arrow
+from matplotlib.patches import Circle, Rectangle, Arrow, Wedge
 from mpl_toolkits.mplot3d import Axes3D
 import argparse
 import sys
 from matplotlib.widgets import Button
 import matplotlib.colors
+import matplotlib.animation as animation
 
 def plot_event(event_number, tree, metadata=None, ax=None, fig=None):
     if ax is None or fig is None:
@@ -427,6 +428,408 @@ def demonstrate_antikt(event_number, tree):
     plt.tight_layout()
     return fig
 
+def animate_antikt(event_number, tree):
+    """Create an animated demonstration of the anti-kt algorithm"""
+    import matplotlib.animation as animation
+    from matplotlib.patches import Circle, Wedge
+    
+    # Create figure with four areas
+    fig = plt.figure(figsize=(15, 12))
+    gs = plt.GridSpec(3, 2, height_ratios=[3, 1, 1])
+    ax_main = fig.add_subplot(gs[0, :])
+    ax_explain = fig.add_subplot(gs[1, 0])
+    ax_metrics = fig.add_subplot(gs[1, 1])
+    ax_text = fig.add_subplot(gs[2, :])
+    
+    fig.suptitle('Anti-kT Algorithm Demonstration', fontsize=14, y=0.98)
+    
+    # Get data for the specific event
+    particle_pt = tree['particle_pt'].array()[event_number]
+    particle_eta = tree['particle_eta'].array()[event_number]
+    particle_phi = tree['particle_phi'].array()[event_number]
+    
+    # Take only top 20 pT particles
+    top_n = 20
+    indices = np.argsort(particle_pt)[::-1][:top_n]
+    particle_pt = particle_pt[indices]
+    particle_eta = particle_eta[indices]
+    particle_phi = particle_phi[indices]
+    
+    # Define number of particles after selection
+    n_particles = len(particle_pt)
+    
+    # Initialize clustering state
+    particle_status = np.zeros(n_particles)  # 0: free, 1: clustered, 2: beam
+    clustering_sequence = []
+    current_jet_id = 0
+    clustered_particles = {}  # jet_id -> list of particle indices
+    jet_centers = {}  # jet_id -> (eta, phi, pt)
+    
+    def calculate_dij():
+        all_dij = []
+        for i in range(n_particles):
+            if particle_status[i] == 0:
+                # Beam distance
+                diB = 1/particle_pt[i]**2
+                all_dij.append((i, 'B', diB, 0.0))  # dR=0 for beam
+                
+                # Particle distances
+                for j in range(i+1, n_particles):
+                    if particle_status[j] == 0:
+                        dR = np.sqrt((particle_eta[i]-particle_eta[j])**2 + 
+                                   (particle_phi[i]-particle_phi[j])**2)
+                        kt = min(1/particle_pt[i]**2, 1/particle_pt[j]**2)
+                        dij = kt * dR**2/0.4**2
+                        all_dij.append((i, j, dij, dR))
+        
+        return sorted(all_dij, key=lambda x: x[2])
+    
+    # Generate full clustering sequence
+    while True:
+        dij_list = calculate_dij()
+        if not dij_list:
+            break
+            
+        clustering_sequence.append(dij_list[:3])  # Store top 3 candidates
+        i, j, dij, dR = dij_list[0]  # Get minimum distance
+        
+        if j == 'B':
+            particle_status[i] = 2
+        else:
+            if current_jet_id not in clustered_particles:
+                # New jet
+                clustered_particles[current_jet_id] = [i, j]
+                particle_status[i] = particle_status[j] = 1
+                total_pt = particle_pt[i] + particle_pt[j]
+                jet_centers[current_jet_id] = (
+                    (particle_eta[i] * particle_pt[i] + particle_eta[j] * particle_pt[j]) / total_pt,
+                    (particle_phi[i] * particle_pt[i] + particle_phi[j] * particle_pt[j]) / total_pt,
+                    total_pt
+                )
+                current_jet_id += 1
+            else:
+                # Add to existing jet
+                clustered_particles[current_jet_id].append(i)
+                particle_status[i] = 1
+                jet_eta, jet_phi, jet_pt = jet_centers[current_jet_id]
+                total_pt = jet_pt + particle_pt[i]
+                jet_centers[current_jet_id] = (
+                    (jet_eta * jet_pt + particle_eta[i] * particle_pt[i]) / total_pt,
+                    (jet_phi * jet_pt + particle_phi[i] * particle_pt[i]) / total_pt,
+                    total_pt
+                )
+    
+    # Initialize state for animation
+    particle_states = []  # Will store state at each step
+    jet_states = []      # Will store jet info at each step
+    
+    # Initial state
+    current_particles = {
+        'status': np.zeros(n_particles),  # 0: free, 1: clustered, 2: beam
+        'jets': {},      # jet_id -> list of particle indices
+        'centers': {}    # jet_id -> (eta, phi, pt)
+    }
+    particle_states.append(current_particles.copy())
+    jet_states.append({})
+    
+    # Generate states for each step
+    current_jet_id = 0
+    for step in range(len(clustering_sequence)):
+        i, j, dij, dR = clustering_sequence[step][0]
+        
+        # Deep copy current state
+        new_state = {
+            'status': current_particles['status'].copy(),
+            'jets': {k: v.copy() for k, v in current_particles['jets'].items()},
+            'centers': {k: v for k, v in current_particles['centers'].items()}
+        }
+        
+        if j == 'B':
+            new_state['status'][i] = 2
+        else:
+            if current_jet_id not in new_state['jets']:
+                # New jet
+                new_state['jets'][current_jet_id] = [i, j]
+                new_state['status'][i] = new_state['status'][j] = 1
+                total_pt = particle_pt[i] + particle_pt[j]
+                new_state['centers'][current_jet_id] = (
+                    (particle_eta[i] * particle_pt[i] + particle_eta[j] * particle_pt[j]) / total_pt,
+                    (particle_phi[i] * particle_pt[i] + particle_phi[j] * particle_pt[j]) / total_pt,
+                    total_pt
+                )
+                current_jet_id += 1
+            else:
+                # Add to existing jet
+                new_state['jets'][current_jet_id].append(i)
+                new_state['status'][i] = 1
+                jet_eta, jet_phi, jet_pt = new_state['centers'][current_jet_id]
+                total_pt = jet_pt + particle_pt[i]
+                new_state['centers'][current_jet_id] = (
+                    (jet_eta * jet_pt + particle_eta[i] * particle_pt[i]) / total_pt,
+                    (jet_phi * jet_pt + particle_phi[i] * particle_pt[i]) / total_pt,
+                    total_pt
+                )
+        
+        particle_states.append(new_state)
+        jet_states.append(new_state['centers'])
+        current_particles = new_state
+    
+    def update(frame):
+        # Clear the entire figure first
+        plt.clf()
+        
+        # Recreate the GridSpec and subplots for each frame
+        gs = plt.GridSpec(3, 2, height_ratios=[3, 1, 1])
+        ax_main = fig.add_subplot(gs[0, :])
+        ax_explain = fig.add_subplot(gs[1, 0])
+        ax_metrics = fig.add_subplot(gs[1, 1])
+        ax_text = fig.add_subplot(gs[2, :])
+        
+        # Set the main title
+        fig.suptitle('Anti-kT Algorithm Demonstration', fontsize=14, y=0.98)
+        
+        # Remove boxes from all subplots
+        for ax in [ax_main, ax_explain, ax_metrics, ax_text]:
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+        
+        # Set up main plot
+        ax_main.set_xlim(-4, 4)
+        ax_main.set_ylim(-np.pi, np.pi)
+        ax_main.set_xlabel('η')
+        ax_main.set_ylabel('φ')
+        ax_main.grid(True, alpha=0.3)
+        ax_main.set_title('Particle Clustering', pad=20)
+        
+        # Get current state
+        state = particle_states[min(frame, len(particle_states)-1)]
+        
+        # Show unclustered particles in main plot
+        unclustered = state['status'] == 0
+        ax_main.scatter(particle_eta[unclustered], particle_phi[unclustered],
+                       s=particle_pt[unclustered]*10,
+                       c='gray',
+                       alpha=0.6,
+                       label='Unclustered')
+        
+        # Show jets and their particles in main plot
+        colors = plt.cm.Set1(np.linspace(0, 1, max(1, len(state['jets']))))
+        for jet_id, particles in state['jets'].items():
+            color = colors[jet_id % len(colors)]
+            jet_eta, jet_phi, jet_pt = state['centers'][jet_id]
+            
+            # Draw jet cone
+            circle = Circle((jet_eta, jet_phi),
+                          radius=0.4,
+                          fill=False,
+                          color=color,
+                          linestyle='--',
+                          alpha=0.5)
+            ax_main.add_patch(circle)
+            
+            # Show jet center and particles
+            ax_main.scatter(jet_eta, jet_phi,
+                          s=jet_pt*20,
+                          c=[color],
+                          marker='^',
+                          label=f'Jet {jet_id}: pT={jet_pt:.1f} GeV')
+            
+            for idx in particles:
+                ax_main.scatter(particle_eta[idx], particle_phi[idx],
+                              s=particle_pt[idx]*10,
+                              c=[color],
+                              alpha=0.6)
+        
+        # Show current clustering step in main plot
+        if frame < len(clustering_sequence):
+            i, j, dij, dR = clustering_sequence[frame][0]
+            if j != 'B':
+                ax_main.plot([particle_eta[i], particle_eta[j]],
+                           [particle_phi[i], particle_phi[j]],
+                           'r--',
+                           linewidth=2,
+                           label='Current clustering')
+        
+        # Create step visualization in explanation subplot
+        ax_explain.set_title('Clustering Process')
+        if frame < len(clustering_sequence):
+            # Show all particles
+            ax_explain.scatter(particle_eta, particle_phi,
+                             s=particle_pt*5,  # Smaller points
+                             alpha=0.2,
+                             c='gray')
+            
+            # Show current clustering step
+            i, j, dij, dR = clustering_sequence[frame][0]
+            if j != 'B':
+                # Draw arrow from i to j
+                ax_explain.arrow(particle_eta[i], particle_phi[i],
+                               particle_eta[j] - particle_eta[i],
+                               particle_phi[j] - particle_phi[i],
+                               head_width=0.1, head_length=0.1,
+                               fc='red', ec='red',
+                               alpha=0.8,
+                               length_includes_head=True)
+                
+                # Annotate particles
+                ax_explain.annotate(f'pT={particle_pt[i]:.1f}',
+                                  (particle_eta[i], particle_phi[i]),
+                                  xytext=(5, 5), textcoords='offset points',
+                                  fontsize=8)
+                ax_explain.annotate(f'pT={particle_pt[j]:.1f}',
+                                  (particle_eta[j], particle_phi[j]),
+                                  xytext=(5, 5), textcoords='offset points',
+                                  fontsize=8)
+                
+                # Show dR and dij
+                midpoint = ((particle_eta[i] + particle_eta[j])/2,
+                          (particle_phi[i] + particle_phi[j])/2)
+                ax_explain.annotate(f'ΔR={dR:.2f}\ndij={dij:.2e}',
+                                  midpoint,
+                                  xytext=(10, 10),
+                                  textcoords='offset points',
+                                  bbox=dict(facecolor='white', alpha=0.7))
+        
+        ax_explain.set_xlim(-4, 4)
+        ax_explain.set_ylim(-np.pi, np.pi)
+        ax_explain.set_xlabel('η')
+        ax_explain.set_ylabel('φ')
+        ax_explain.grid(True, alpha=0.3)
+        
+        # Create distance matrix visualization in metrics subplot
+        if frame < len(clustering_sequence):
+            # Calculate current distances for visualization
+            dij_matrix = np.zeros((n_particles, n_particles))
+            for i in range(n_particles):
+                for j in range(i+1, n_particles):
+                    if state['status'][i] == 0 and state['status'][j] == 0:
+                        dR = np.sqrt((particle_eta[i]-particle_eta[j])**2 + 
+                                   (particle_phi[i]-particle_phi[j])**2)
+                        kt = min(1/particle_pt[i]**2, 1/particle_pt[j]**2)
+                        dij = kt * dR**2/0.4**2
+                        dij_matrix[i,j] = dij_matrix[j,i] = dij
+            
+            # Plot distance matrix
+            im = ax_metrics.imshow(np.log10(dij_matrix + 1e-20),
+                                 cmap='viridis',
+                                 aspect='auto')
+            
+            # Add colorbar with removed box
+            cbar = plt.colorbar(im, ax=ax_metrics)
+            cbar.outline.set_visible(False)
+            cbar.set_label('log₁₀(dᵢⱼ)', rotation=270, labelpad=15)
+            
+            # Set title and labels with adjusted positions
+            ax_metrics.set_title('Distance Matrix', y=1.05)
+            
+            # Create tick labels with pT values
+            active_particles = np.where(state['status'] == 0)[0]
+            if len(active_particles) > 0:
+                tick_labels = [f'{i}\n({particle_pt[i]:.1f} GeV)' 
+                             for i in range(n_particles)]
+                ax_metrics.set_xticks(range(n_particles))
+                ax_metrics.set_yticks(range(n_particles))
+                ax_metrics.set_xticklabels(tick_labels, rotation=45, ha='right')
+                ax_metrics.set_yticklabels(tick_labels)
+                
+                # Add labels explaining the axes
+                ax_metrics.set_xlabel('Particle Index (pT)', labelpad=10)
+                ax_metrics.set_ylabel('Particle Index (pT)', labelpad=10)
+            
+            # Remove box around plot
+            for spine in ax_metrics.spines.values():
+                spine.set_visible(False)
+            
+            # Highlight current clustering pair
+            i, j, dij, dR = clustering_sequence[frame][0]
+            if j != 'B':
+                ax_metrics.plot(j, i, 'rx', markersize=10, label='Current pair')
+                ax_metrics.plot(i, j, 'rx', markersize=10)
+                
+                # Add annotation for current pair
+                ax_metrics.annotate(f'dij={dij:.2e}',
+                                  xy=(j, i),
+                                  xytext=(10, 10),
+                                  textcoords='offset points',
+                                  bbox=dict(facecolor='white', alpha=0.7))
+        else:
+            ax_metrics.text(0.5, 0.5, 'Clustering Complete',
+                          ha='center', va='center',
+                          transform=ax_metrics.transAxes,
+                          fontsize=12)
+            ax_metrics.axis('off')
+        
+        # Show current step explanation
+        if frame < len(clustering_sequence):
+            i, j, dij, dR = clustering_sequence[frame][0]
+            step_text = "Current Step Explanation:\n\n"
+            
+            if j == 'B':
+                step_text += (
+                    f"• Particle {i} (pT={particle_pt[i]:.1f} GeV)\n"
+                    f"• Beam distance diB={dij:.2e}\n"
+                    f"• Creating new jet from particle"
+                )
+            else:
+                step_text += (
+                    f"• Particles {i} and {j}\n"
+                    f"• pT: {particle_pt[i]:.1f} GeV, {particle_pt[j]:.1f} GeV\n"
+                    f"• Distance ΔR={dR:.2f}\n"
+                    f"• Metric dij={dij:.2e}\n"
+                    f"• {'Creating new jet' if current_jet_id not in state['jets'] else 'Adding to existing jet'}"
+                )
+        else:
+            step_text = "Final Jets:\n\n"
+            for jet_id, (_, _, pt) in state['centers'].items():
+                n_const = len(state['jets'][jet_id])
+                step_text += f"• Jet {jet_id}: pT={pt:.1f} GeV, {n_const} particles\n"
+        
+        ax_text.text(0.05, 0.95, step_text,
+                    transform=ax_text.transAxes,
+                    verticalalignment='top',
+                    fontfamily='monospace',
+                    bbox=dict(facecolor='white', alpha=0.9))
+        ax_text.axis('off')
+        
+        # Show metrics with current values
+        metrics_text = (
+            'Distance Metrics:\n\n'
+            r'$d_{ij} = \min(p_{T,i}^{-2}, p_{T,j}^{-2})\frac{\Delta R_{ij}^2}{R^2}$' '\n'
+            r'$\Delta R_{ij}^2 = (\eta_i - \eta_j)^2 + (\phi_i - \phi_j)^2$' '\n'
+            r'$d_{iB} = p_{T,i}^{-2}$' '\n\n'
+            'Parameters:\n'
+            '• R = 0.4 (jet radius)\n'
+            f'• Particles: {n_particles}\n'
+            f'• Current jets: {len(state["jets"])}'
+        )
+        ax_metrics.text(0.05, 0.01, metrics_text,
+                       transform=ax_metrics.transAxes,
+                       verticalalignment='top',
+                       bbox=dict(facecolor='white', alpha=0.9))
+        ax_metrics.axis('off')
+        
+        # Adjust layout
+        plt.tight_layout(h_pad=2.0, w_pad=2.0)
+        
+        return ax_main, ax_text, ax_metrics, ax_explain
+    
+    # Create animation
+    anim = animation.FuncAnimation(fig, update,
+                                 frames=len(clustering_sequence) + 5,
+                                 interval=1000,
+                                 blit=True)
+    
+    plt.show()
+
+def toggle_animation(event, anim):
+    if anim.running:
+        anim.event_source.stop()
+        event.inaxes.texts[0].set_text('Play')
+    else:
+        anim.event_source.start()
+        event.inaxes.texts[0].set_text('Pause')
+    anim.running = not anim.running
+
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Demonstrate anti-kt algorithm')
@@ -531,6 +934,9 @@ def main():
     # Create and show the demonstration
     fig = demonstrate_antikt(event_number, tree)
     plt.show()
+
+    # Create the animation
+    animate_antikt(args.event, tree)
 
 if __name__ == "__main__":
     main() 
